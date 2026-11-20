@@ -1,0 +1,22 @@
+# Local credentials and generated runtime configuration
+.env
+.htpasswd
+
+# Media files and mounted storage
+*.mp4
+*.m4v
+*.mkv
+*.mov
+*.webm
+media/
+
+# Editor backups, logs, generated files and caches
+*~
+*.log
+*.tmp
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

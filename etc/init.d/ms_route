@@ -1,0 +1,117 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+USE_PROCD=1
+
+BASE_DIR="/opt/media-server-openwrt"
+
+UBUS_BIN="$(command -v ubus 2>/dev/null)"
+[ -n "$UBUS_BIN" ] || UBUS_BIN="/bin/ubus"
+
+ubus() {
+    if [ "$1" = "call" ] &&
+       [ "$2" = "service" ] &&
+       [ "$3" = "delete" ]; then
+
+        _ms_ubus_output=$("$UBUS_BIN" "$@" 2>&1)
+        _ms_ubus_status=$?
+
+        case "$_ms_ubus_output" in
+            *"Command failed: Not found"*)
+                return 0
+                ;;
+        esac
+
+        [ -n "$_ms_ubus_output" ] &&
+            printf '%s\n' "$_ms_ubus_output" >&2
+
+        return "$_ms_ubus_status"
+    fi
+
+    "$UBUS_BIN" "$@"
+}
+
+load_config() {
+    if [ ! -r "$BASE_DIR/bin/config.sh" ]; then
+        echo "[-] ERROR: $BASE_DIR/bin/config.sh not found." >&2
+        return 1
+    fi
+    . "$BASE_DIR/bin/config.sh" || return 1
+    load_app_env || return 1
+
+    [ -n "$LAN_ROUTER_INTERFACE" ] || {
+        echo "[-] ERROR: LAN_ROUTER_INTERFACE is empty." >&2
+        return 1
+    }
+    [ -n "$ANCHOR_IP" ] || {
+        echo "[-] ERROR: ANCHOR_IP is empty." >&2
+        return 1
+    }
+    [ -n "$FW_TABLE" ] || {
+        echo "[-] ERROR: FW_TABLE is empty." >&2
+        return 1
+    }
+    return 0
+}
+
+apply_network_at_boot() {
+    # netifd normally creates br-lan before START=99. A bounded wait covers
+    # slower/cold boots without making Flask depend on external states.
+    _wait=0
+    while ! ip link show dev "$LAN_ROUTER_INTERFACE" >/dev/null 2>&1; do
+        if [ "$_wait" -ge 30 ]; then
+            ms_log "ERROR: LAN interface $LAN_ROUTER_INTERFACE did not appear within 30 seconds."
+            return 1
+        fi
+        sleep 1
+        _wait=$((_wait + 1))
+    done
+
+    _attempt=1
+    while [ "$_attempt" -le 3 ]; do
+        if /bin/sh "$BASE_DIR/bin/network.sh" apply; then
+            return 0
+        fi
+        ms_log "WARNING: network setup attempt $_attempt/3 failed; retrying."
+        sleep 2
+        _attempt=$((_attempt + 1))
+    done
+
+    ms_log "ERROR: anchor/nftables setup did not complete. Flask will still start; run bin/network.sh apply after fixing the network."
+    return 1
+}
+
+start_service() {
+    load_config || return 1
+
+    mkdir -p "$(dirname "$APP_LOG_FILE")" || return 1
+    touch "$APP_LOG_FILE" || return 1
+    chmod 640 "$APP_LOG_FILE" 2>/dev/null || :
+
+    ms_log "Starting Local Media Server."
+
+    # Register Flask. It is independent of tether/WAN state.
+    procd_open_instance "ms_flask"
+    procd_set_param command /usr/bin/python3 "$BASE_DIR/app/media_server.py"
+    procd_set_param env PYTHONUNBUFFERED=1
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param respawn 3600 5 5
+    procd_close_instance
+
+    ms_log "Flask service registered with procd."
+
+    # Install the fixed local shortcut at boot.
+    apply_network_at_boot || :
+}
+
+stop_service() {
+    if [ -r "$BASE_DIR/bin/config.sh" ]; then
+        . "$BASE_DIR/bin/config.sh"
+        load_app_env || :
+        ms_log "Stopping Local Media Server."
+        [ -x "$BASE_DIR/bin/network.sh" ] && /bin/sh "$BASE_DIR/bin/network.sh" cleanup
+        ms_log "Local Media Server stopped."
+    fi
+}

@@ -1,0 +1,416 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Media Hub</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            --bg: #000;
+            --panel: #111;
+            --accent: #cc0000;
+            --tile-border: #e65b32;
+            --text: #eee;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: sans-serif;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #sidebar {
+            width: 260px;
+            flex: 0 0 260px;
+            background: var(--panel);
+            overflow-y: auto;
+            border-right: 1px solid #222;
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            font-size: 22px;
+            font-weight: bold;
+            color: var(--accent);
+            text-align: center;
+            cursor: pointer;
+        }
+
+        .tree-item {
+            padding: 18px;
+            font-size: 18px;
+            border-bottom: 1px solid #1f1f1f;
+            cursor: pointer;
+            overflow-wrap: anywhere;
+        }
+
+        .tree-item:active {
+            background: #333;
+        }
+
+        #main {
+            min-width: 0;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #topbar {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            background: #111;
+            border-bottom: 1px solid #222;
+        }
+
+        .btn {
+            background: #222;
+            border: none;
+            color: white;
+            padding: 14px 18px;
+            font-size: 16px;
+            margin-right: 10px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .btn:active {
+            background: #444;
+        }
+
+        #breadcrumb {
+            font-size: 14px;
+            color: #aaa;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+        #list {
+            flex: 1;
+            overflow-y: auto;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            padding: 12px;
+            align-content: start;
+        }
+
+        .card {
+            min-width: 0;
+            background: #181818;
+            border: 2px solid var(--tile-border);
+            border-radius: 8px;
+            padding: 18px 12px;
+            font-size: 20px;
+            line-height: 1.35;
+            text-align: center;
+            cursor: pointer;
+            user-select: none;
+            overflow-wrap: anywhere;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 90px;
+        }
+
+        .card:active {
+            background: #333;
+            border-color: #ff875c;
+        }
+
+        #message {
+            padding: 20px;
+            color: #aaa;
+            grid-column: 1 / -1;
+            text-align: center;
+        }
+
+        #overlay {
+            position: fixed;
+            inset: 0;
+            background: black;
+            display: none;
+            z-index: 999;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+        }
+
+        .close {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            padding: 14px 20px;
+            font-size: 16px;
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            z-index: 2;
+        }
+
+        @media (max-width: 700px) {
+            #sidebar {
+                width: 150px;
+                flex-basis: 150px;
+            }
+
+            #list {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="sidebar-header" id="rootBtn">MEDIA</div>
+    <div id="tree"></div>
+</div>
+
+<div id="main">
+    <div id="topbar">
+        <button class="btn" id="backBtn" type="button">⬅ Back</button>
+        <div id="breadcrumb">/</div>
+    </div>
+
+    <div id="list">
+        <div id="message">Loading media…</div>
+    </div>
+</div>
+
+<div id="overlay">
+    <button class="close" id="closeBtn" type="button">Close</button>
+    <video id="player" controls autoplay playsinline></video>
+</div>
+
+<script>
+"use strict";
+
+var initialPath = {{ initial_path|tojson }};
+var currentPath = initialPath;
+var currentPlaylist = [];
+var currentVideoIndex = -1;
+
+function clearNode(node) {
+    while (node.firstChild) {
+        node.removeChild(node.firstChild);
+    }
+}
+
+function videoPath(path) {
+    return "/video/" + path.split("/").map(function (part) {
+        return encodeURIComponent(part);
+    }).join("/");
+}
+
+/*
+ * Display filename rules:
+ *
+ * Standardized:
+ *   Movie Title (2020) - 1080p x265.mkv
+ *   -> Movie Title (2020)
+ *
+ * Nonstandard:
+ *   Show Name 001.mkv
+ *   Show-Name-001.mkv
+ *   Show Name #001.mkv
+ *   -> Preserve filename, excluding extension.
+ *
+ * Only remove format information when the filename matches
+ * the standardized year-plus-format naming convention.
+ */
+function displayVideoTitle(filename) {
+    var name = filename.replace(/\.[^.]+$/, "");
+
+    var standardMatch = name.match(
+        /^(.+?)\s+\(((?:18|19|20)\d{2})\)\s+-\s+.+$/
+    );
+
+    if (standardMatch) {
+        return standardMatch[1] + " (" + standardMatch[2] + ")";
+    }
+
+    return name;
+}
+
+function makeCard(item) {
+    var card = document.createElement("div");
+    card.className = "card";
+
+    var name = document.createElement("div");
+
+    name.textContent = item.is_dir
+        ? item.name
+        : displayVideoTitle(item.name);
+
+    card.appendChild(name);
+
+    card.addEventListener("click", function () {
+        if (item.is_dir) {
+            load(item.path);
+        } else {
+            play(item.path);
+        }
+    });
+
+    return card;
+}
+
+function load(path) {
+    currentPath = path;
+
+    document.getElementById("breadcrumb").textContent = "/" + path;
+
+    fetch("/api/list?path=" + encodeURIComponent(path))
+        .then(function (response) {
+            if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+            }
+
+            return response.json();
+        })
+        .then(function (items) {
+            currentPlaylist = items
+                .filter(function (item) {
+                    return !item.is_dir;
+                })
+                .sort(function (a, b) {
+                    var nameA = a.name.toLowerCase();
+                    var nameB = b.name.toLowerCase();
+
+                    if (nameA < nameB) return -1;
+                    if (nameA > nameB) return 1;
+
+                    return a.name < b.name ? -1 :
+                           a.name > b.name ? 1 : 0;
+                });
+
+            currentVideoIndex = -1;
+
+            var tree = document.getElementById("tree");
+
+            if (path === initialPath || path.indexOf("/") === -1) {
+                clearNode(tree);
+
+                items.forEach(function (item) {
+                    if (!item.is_dir) return;
+
+                    var entry = document.createElement("div");
+                    entry.className = "tree-item";
+                    entry.textContent = item.name;
+
+                    entry.addEventListener("click", function () {
+                        load(item.path);
+                    });
+
+                    tree.appendChild(entry);
+                });
+            }
+
+            var list = document.getElementById("list");
+            clearNode(list);
+
+            if (!items.length) {
+                var empty = document.createElement("div");
+                empty.id = "message";
+                empty.textContent = "No media found in this folder.";
+                list.appendChild(empty);
+                return;
+            }
+
+            items.forEach(function (item) {
+                list.appendChild(makeCard(item));
+            });
+        })
+        .catch(function (error) {
+            var list = document.getElementById("list");
+            clearNode(list);
+
+            var message = document.createElement("div");
+            message.id = "message";
+            message.textContent = "Unable to load media: " + error.message;
+
+            list.appendChild(message);
+        });
+}
+
+function play(path) {
+    currentVideoIndex = currentPlaylist.findIndex(function (item) {
+        return item.path === path;
+    });
+
+    var player = document.getElementById("player");
+    player.src = videoPath(path);
+
+    document.getElementById("overlay").style.display = "block";
+
+    try {
+        var playResult = player.play();
+
+        if (playResult && typeof playResult.catch === "function") {
+            playResult.catch(function () {});
+        }
+    } catch (error) {}
+}
+
+function playNext() {
+    var nextIndex = currentVideoIndex + 1;
+
+    if (nextIndex >= currentPlaylist.length) {
+        return;
+    }
+
+    play(currentPlaylist[nextIndex].path);
+}
+
+function closePlayer() {
+    var player = document.getElementById("player");
+
+    player.pause();
+    player.removeAttribute("src");
+    player.load();
+
+    currentVideoIndex = -1;
+
+    document.getElementById("overlay").style.display = "none";
+}
+
+function back() {
+    if (currentPath === initialPath || !currentPath) {
+        return;
+    }
+
+    var parts = currentPath.split("/");
+    parts.pop();
+
+    load(parts.join("/"));
+}
+
+document.getElementById("rootBtn").addEventListener("click", function () {
+    load(initialPath);
+});
+
+document.getElementById("backBtn").addEventListener("click", back);
+document.getElementById("closeBtn").addEventListener("click", closePlayer);
+
+document.getElementById("player").addEventListener("ended", playNext);
+
+load(initialPath);
+</script>
+
+</body>
+</html>
